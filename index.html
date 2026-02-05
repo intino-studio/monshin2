@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>デジタル問診票システム (Cloud Sync)</title>
+    <title>デジタル問診票システム (Modern Material)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- QR Code Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
@@ -18,30 +18,51 @@
 
         // Global state
         window.entries = [];
-        window.masterPassword = "1111";
+        window.masterPassword = "1111"; 
         window.isReceptionAuthenticated = false;
+        window.currentUser = null;
 
-        // Firebase Configuration (Environment provided)
-        const firebaseConfig = JSON.parse(__firebase_config);
+        // Firebase Configuration (Provided by environment)
+        let firebaseConfig = {};
+        try {
+            firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+        } catch (e) {
+            console.error("Firebase config parse error", e);
+        }
+        
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'medical-form-app';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
         // Auth initialization (Rule 3)
         const initAuth = async () => {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-                await signInAnonymously(auth);
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (e) {
+                console.error("Authentication failed", e);
             }
         };
+
+        onAuthStateChanged(auth, (user) => {
+            window.currentUser = user;
+            if (user && window.isReceptionAuthenticated) {
+                window.startListening();
+            }
+        });
+
         initAuth();
 
         // Listen for data updates (Reception side)
         let unsubscribeEntries = null;
         window.startListening = () => {
-            if (!auth.currentUser) return;
+            if (!window.currentUser) return;
+            if (unsubscribeEntries) unsubscribeEntries();
+
             const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'questionnaires');
             
             unsubscribeEntries = onSnapshot(colRef, (snapshot) => {
@@ -50,19 +71,24 @@
                     data.push({ id: doc.id, ...doc.data() });
                 });
                 // Sort by timestamp descending in memory (Rule 2)
-                window.entries = data.sort((a, b) => b.createdAt?.seconds - a.createdAt?.seconds);
+                window.entries = data.sort((a, b) => {
+                    const timeA = a.createdAt?.seconds || 0;
+                    const timeB = b.createdAt?.seconds || 0;
+                    return timeB - timeA;
+                });
                 window.renderEntries();
             }, (error) => {
-                console.error("Firestore error:", error);
+                console.error("Firestore snapshot error:", error);
             });
         };
 
         // Send data (Patient side)
         window.dbSubmit = async (formData, diagnosed) => {
-            if (!auth.currentUser) {
-                alert("通信エラーが発生しました。ページを再読み込みしてください。");
-                return;
+            if (!window.currentUser) {
+                await initAuth();
+                if (!window.currentUser) throw new Error("Authentication required");
             }
+
             const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'questionnaires');
             await addDoc(colRef, {
                 data: formData,
@@ -71,16 +97,15 @@
             });
         };
 
-        // Cleanup function for 23:00 (Rule: delete from DB)
+        // Cleanup function for 23:00
         window.cleanupDatabase = async () => {
-            if (!auth.currentUser) return;
+            if (!window.currentUser) return;
             const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'questionnaires');
             const qSnap = await getDocs(colRef);
-            qSnap.forEach(async (d) => {
+            for (const d of qSnap.docs) {
                 await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'questionnaires', d.id));
-            });
+            }
         };
-
     </script>
 
     <style>
@@ -122,6 +147,7 @@
             transition: all 0.2s ease;
             outline: none;
             background-color: #ffffff;
+            appearance: none;
         }
         .md-input:focus {
             border-color: var(--md-primary);
@@ -164,10 +190,15 @@
         .input-error { border-color: var(--md-accent) !important; background-color: #fff5f7 !important; }
 
         .elevation-2 { box-shadow: 0 3px 6px rgba(0,0,0,0.16), 0 3px 6px rgba(0,0,0,0.23); }
+
+        #qrcodeContainer svg {
+            margin: 0 auto;
+            max-width: 100%;
+        }
     </style>
 </head>
 <body class="p-4 sm:p-6 md:p-10 min-h-screen">
-    <!-- Role Switcher (Hidden in production or moved to specific URL) -->
+    <!-- Role Switcher -->
     <div class="max-w-xl mx-auto mb-6 flex justify-end">
         <div class="inline-flex p-1 bg-gray-200 rounded-xl elevation-2">
             <button onclick="switchMode('patient')" id="btnTabPatient" class="px-4 py-2 text-xs font-bold rounded-lg transition-all bg-white shadow">患者</button>
@@ -181,8 +212,9 @@
             <h1 class="text-2xl font-bold tracking-tight">デジタル問診票</h1>
             <p class="text-sm mt-2 opacity-90">画面の指示に従って入力してください</p>
         </div>
+        
         <div class="w-full bg-indigo-100 h-1.5">
-            <div id="progress" class="bg-indigo-400 h-1.5 transition-all duration-500 ease-out" style="width: 33%;"></div>
+            <div id="progress" class="bg-indigo-400 h-1.5 transition-all duration-500 ease-out" style="width: 33.33%;"></div>
         </div>
 
         <form id="medicalForm" class="p-8 space-y-8">
@@ -192,6 +224,7 @@
                     <div class="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-md">1</div>
                     <h2 class="text-xl font-bold text-gray-800">基本情報</h2>
                 </div>
+                
                 <div class="space-y-5">
                     <div>
                         <label class="block text-sm font-medium text-gray-600 mb-1.5 required-mark">お名前</label>
@@ -244,8 +277,9 @@
                     <div class="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-md">2</div>
                     <h2 class="text-xl font-bold text-gray-800">既往・体温</h2>
                 </div>
-                <p class="text-xs text-gray-400 mb-8 px-11">※必須項目以外で記載がない場合はそのまま次へ進んでください</p>
-                <div class="space-y-6">
+                <p class="text-xs text-gray-400 mb-8 px-11 text-left">※必須項目以外で記載がない場合はそのまま次へ進んでください</p>
+                
+                <div class="space-y-6 text-left">
                     <div>
                         <label class="block text-sm font-bold text-indigo-800 mb-3 px-1">今までに指摘された病気</label>
                         <div class="grid grid-cols-2 gap-3 mb-4 radio-group">
@@ -263,7 +297,7 @@
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-600 mb-1.5">備考・お伝えしたいこと</label>
-                        <textarea name="detail" rows="3" class="md-input" placeholder="症状の経過など"></textarea>
+                        <textarea name="detail" rows="3" class="md-input" placeholder="現在の症状など"></textarea>
                     </div>
                 </div>
                 <div class="mt-10 flex flex-col-reverse sm:flex-row justify-between gap-4">
@@ -272,21 +306,21 @@
                 </div>
             </div>
 
-            <!-- Step 3: Treatment & Lifestyle -->
+            <!-- Step 3: Medication & Lifestyle -->
             <div id="step3" class="form-step">
                 <div class="flex items-center space-x-3 mb-2">
                     <div class="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-md">3</div>
                     <h2 class="text-xl font-bold text-gray-800">治療・生活習慣</h2>
                 </div>
-                <p class="text-xs text-gray-400 mb-8 px-11">※必須項目以外で記載がない場合はそのまま送信してください</p>
-                <div class="space-y-6">
+                <p class="text-xs text-gray-400 mb-8 px-11 text-left">※必須項目以外で記載がない場合はそのまま送信してください</p>
+                <div class="space-y-6 text-left">
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
                             <label class="block text-sm font-medium text-gray-600 mb-1.5">現在治療中の他の病気</label>
                             <input type="text" name="history" class="md-input">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-600 mb-1.5">妊娠・授乳の有無</label>
+                            <label class="block text-sm font-medium text-gray-700 mb-1.5">妊娠・授乳の有無</label>
                             <select name="pregnancy" class="md-input">
                                 <option value="なし">なし</option>
                                 <option value="妊娠中">妊娠中</option>
@@ -295,11 +329,11 @@
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-600 mb-1.5">現在服用中のお薬</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-1.5">現在服用中のお薬</label>
                         <input type="text" name="meds" class="md-input" placeholder="お薬手帳の内容など">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-600 mb-1.5">アレルギー</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-1.5">アレルギー</label>
                         <input type="text" name="allergy" class="md-input" placeholder="薬や食品など">
                     </div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-6 border-t border-gray-100">
@@ -323,7 +357,7 @@
                 </div>
                 <div class="mt-10 flex flex-col-reverse sm:flex-row justify-between gap-4">
                     <button type="button" onclick="nextStep(2)" class="md-btn bg-gray-100 text-gray-500 w-full sm:w-auto shadow-none">戻る</button>
-                    <button type="button" onclick="submitForm()" id="btnSubmit" class="md-btn bg-green-600 text-white w-full sm:w-auto px-12 font-bold shadow-xl hover:bg-green-700">内容を送信する</button>
+                    <button type="button" onclick="submitForm()" id="btnSubmit" class="md-btn bg-green-600 text-white w-full sm:w-auto px-12 font-bold shadow-xl hover:bg-green-700 transition-all">内容を送信する</button>
                 </div>
             </div>
         </form>
@@ -339,41 +373,43 @@
         <button onclick="switchMode('patient')" class="text-indigo-600 font-bold hover:underline">← 新しく問診を始める</button>
     </div>
 
-    <!-- Reception Side Components -->
+    <!-- 3. Reception Login View -->
     <div id="receptionLoginView" class="view-section max-w-md mx-auto bg-white rounded-3xl elevation-2 p-10 mt-10">
         <h2 class="text-xl font-bold text-center mb-8">受付管理認証</h2>
         <div class="space-y-6">
             <input type="password" id="loginPw" class="md-input text-center text-2xl tracking-[0.5em] bg-gray-50" placeholder="****">
-            <button onclick="checkPassword()" class="md-btn md-btn-primary w-full py-4 elevation-2">ログイン</button>
+            <button onclick="checkPassword()" class="md-btn md-btn-primary w-full py-4 elevation-2 transition-all">ログイン</button>
             <p class="text-xs text-center text-gray-300">初期設定: 1111</p>
         </div>
     </div>
 
+    <!-- 4. Reception Dashboard -->
     <div id="receptionView" class="view-section max-w-4xl mx-auto bg-white rounded-3xl elevation-2 overflow-hidden border border-gray-100">
         <div class="bg-gray-800 p-8 text-white flex flex-col sm:flex-row justify-between items-center gap-4">
-            <h1 class="text-xl font-bold">問診管理パネル</h1>
+            <h1 class="text-xl font-bold tracking-tight">問診管理パネル</h1>
             <div class="flex items-center space-x-4">
-                <span id="entryCount" class="bg-indigo-600 px-4 py-1.5 rounded-full text-xs font-bold">0名</span>
+                <span id="entryCount" class="bg-indigo-600 px-4 py-1.5 rounded-full text-xs font-bold shadow-inner">0名</span>
                 <button onclick="showSettings()" class="text-gray-400 hover:text-white">設定</button>
             </div>
         </div>
         <div class="p-8">
-            <div id="entryList" class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <!-- Entries here -->
+            <!-- Adjusted: Entry list is now a simple vertical stack for full width -->
+            <div id="entryList" class="flex flex-col space-y-6">
+                <!-- Entries will appear here -->
             </div>
         </div>
     </div>
 
-    <!-- Modal Containers -->
+    <!-- Modals -->
     <div id="detailModal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
         <div class="bg-white rounded-[2rem] max-w-2xl w-full max-h-[85vh] flex flex-col elevation-2 overflow-hidden">
             <div class="bg-indigo-50 p-6 flex justify-between items-center border-b">
                 <h3 class="font-bold text-xl text-indigo-900">問診詳細</h3>
-                <button onclick="closeModal('detailModal')" class="text-2xl">&times;</button>
+                <button onclick="closeModal('detailModal')" class="text-2xl p-2">&times;</button>
             </div>
-            <div class="p-8 overflow-y-auto space-y-6 text-sm" id="detailContent"></div>
+            <div class="p-8 overflow-y-auto space-y-6 text-sm text-left" id="detailContent"></div>
             <div class="p-6 bg-gray-50 flex gap-4 border-t">
-                <button onclick="closeModal('detailModal')" class="flex-1 bg-white border py-3 rounded-2xl">閉じる</button>
+                <button onclick="closeModal('detailModal')" class="flex-1 bg-white border-2 border-gray-200 py-3 rounded-2xl">閉じる</button>
                 <button id="btnFromDetailToQR" class="flex-1 md-btn md-btn-primary py-3 rounded-2xl">QR発行</button>
             </div>
         </div>
@@ -382,26 +418,28 @@
     <div id="qrModal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
         <div class="bg-white rounded-[2rem] p-8 max-w-sm w-full text-center space-y-6 elevation-2">
             <div class="flex justify-between items-center border-b pb-4">
-                <h3 class="font-bold text-lg" id="modalTitle">問診QRコード</h3>
-                <button onclick="closeModal('qrModal')" class="text-2xl">&times;</button>
+                <h3 class="font-bold text-lg text-gray-800" id="modalTitle">問診QRコード</h3>
+                <button onclick="closeModal('qrModal')" class="text-2xl p-2">&times;</button>
             </div>
-            <div id="qrcodeContainer" class="bg-indigo-50 p-6 rounded-[2rem] inline-block"></div>
-            <div class="bg-gray-50 p-5 rounded-2xl text-left text-[10px] font-mono text-gray-400 overflow-y-auto max-h-40 border leading-relaxed">
+            <div id="qrcodeContainer" class="bg-indigo-50 p-6 rounded-[2rem] inline-block shadow-inner border border-indigo-100"></div>
+            <p class="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Shift_JIS (SJIS) / 全角スペース区切り</p>
+            <div class="bg-gray-50 p-5 rounded-2xl text-left text-[10px] font-mono text-gray-500 overflow-y-auto max-h-40 border-2 border-gray-100 leading-relaxed shadow-inner">
                 <p id="textPreview" class="whitespace-pre-wrap"></p>
             </div>
-            <button onclick="closeModal('qrModal')" class="w-full bg-gray-800 text-white py-4 rounded-2xl font-bold">閉じる</button>
+            <button onclick="closeModal('qrModal')" class="w-full bg-gray-800 text-white py-4 rounded-2xl font-bold hover:bg-black transition-all">閉じる</button>
         </div>
     </div>
 
-    <!-- Hidden Settings Modal -->
     <div id="settingsModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
         <div class="bg-white rounded-3xl p-8 max-w-xs w-full space-y-5 elevation-2 border-t-8 border-indigo-600">
-            <h3 class="font-bold text-lg text-center">設定</h3>
-            <input type="password" id="newPw" placeholder="新パスワード" class="md-input">
-            <input type="password" id="newPwConfirm" placeholder="確認用" class="md-input">
+            <h3 class="font-bold text-lg text-center text-gray-800">設定</h3>
+            <div class="text-left space-y-4">
+                <input type="password" id="newPw" placeholder="新パスワード" class="md-input">
+                <input type="password" id="newPwConfirm" placeholder="確認用再入力" class="md-input">
+            </div>
             <div class="flex gap-2">
-                <button onclick="closeModal('settingsModal')" class="flex-1 bg-gray-100 py-3 rounded-2xl">戻る</button>
-                <button onclick="updatePassword()" class="flex-1 md-btn md-btn-primary py-3 rounded-2xl">更新</button>
+                <button onclick="closeModal('settingsModal')" class="flex-1 bg-gray-100 py-3 rounded-2xl font-bold">戻る</button>
+                <button onclick="updatePassword()" class="flex-1 md-btn md-btn-primary py-3 rounded-2xl font-bold">更新</button>
             </div>
         </div>
     </div>
@@ -426,7 +464,7 @@
                     document.getElementById('receptionLoginView').classList.add('active');
                 } else {
                     document.getElementById('receptionView').classList.add('active');
-                    window.startListening();
+                    if (window.startListening) window.startListening();
                 }
             } else if (mode === 'success') {
                 document.getElementById('successView').classList.add('active');
@@ -486,32 +524,44 @@
             const diagnosed = fd.getAll('diagnosed');
             
             try {
-                await window.dbSubmit(dataObj, diagnosed);
-                switchMode('success');
+                if (window.dbSubmit) {
+                    await window.dbSubmit(dataObj, diagnosed);
+                    switchMode('success');
+                } else {
+                    throw new Error("Database module not loaded");
+                }
             } catch (e) {
-                alert("送信に失敗しました。時間をおいて再度お試しください。");
+                console.error(e);
+                alert("送信に失敗しました。インターネット接続を確認して、再度お試しください。");
             } finally {
                 btn.disabled = false;
                 btn.innerText = "内容を送信する";
             }
         }
 
+        // Updated: renderEntries is now full-width cards
         window.renderEntries = () => {
             const list = document.getElementById('entryList');
             document.getElementById('entryCount').innerText = `${window.entries.length}名`;
             if (window.entries.length === 0) {
-                list.innerHTML = '<div class="col-span-full py-20 text-center text-gray-400 font-medium">現在、未処理のデータはありません</div>';
+                list.innerHTML = '<div class="py-20 text-center text-gray-400 font-medium">現在、未処理のデータはありません</div>';
                 return;
             }
             list.innerHTML = window.entries.map(e => `
-                <div class="border-2 border-gray-50 rounded-3xl p-6 flex flex-col sm:flex-row justify-between items-center bg-white elevation-1 hover:border-indigo-100 transition-all gap-4">
-                    <div class="w-full">
-                        <div class="font-bold text-lg text-gray-800">${e.data.name} <span class="text-xs font-normal text-gray-400 ml-1">(${e.data.kana || '-'})</span></div>
-                        <div class="text-[10px] text-gray-400 mt-1 font-bold">BD: ${e.data.dob} | ${e.createdAt ? new Date(e.createdAt.seconds * 1000).toLocaleTimeString() : '--'}</div>
+                <div class="border-2 border-gray-100 rounded-[2rem] p-8 flex flex-col sm:flex-row justify-between items-center bg-white elevation-1 hover:border-indigo-200 hover:elevation-2 transition-all gap-6 w-full">
+                    <div class="flex-1 text-left w-full">
+                        <div class="flex items-center gap-3">
+                            <div class="w-2 h-8 bg-indigo-500 rounded-full"></div>
+                            <div class="font-bold text-2xl text-gray-800">${e.data.name} <span class="text-sm font-normal text-gray-400 ml-1">(${e.data.kana || '-'})</span></div>
+                        </div>
+                        <div class="text-[12px] text-gray-400 mt-2 font-bold flex flex-wrap gap-4 px-5">
+                           <span class="bg-gray-100 px-3 py-1 rounded-full uppercase">生年月日: ${formatDate(e.data.dob)}</span>
+                           <span class="bg-gray-100 px-3 py-1 rounded-full uppercase">受付時刻: ${e.createdAt ? new Date(e.createdAt.seconds * 1000).toLocaleTimeString('ja-JP') : '--'}</span>
+                        </div>
                     </div>
-                    <div class="flex space-x-2 w-full sm:w-auto">
-                        <button onclick="showDetails('${e.id}')" class="flex-1 bg-gray-50 text-gray-600 px-4 py-3 rounded-2xl text-xs font-bold border hover:bg-indigo-50 transition-colors">詳細</button>
-                        <button onclick="showQR('${e.id}')" class="flex-1 bg-indigo-600 text-white px-4 py-3 rounded-2xl text-xs font-bold shadow hover:bg-indigo-700 transition-colors">QR</button>
+                    <div class="flex space-x-3 w-full sm:w-auto">
+                        <button onclick="showDetails('${e.id}')" class="flex-1 sm:flex-none bg-gray-50 text-gray-600 px-8 py-4 rounded-2xl text-sm font-bold border hover:bg-indigo-50 hover:text-indigo-600 transition-colors">内容確認</button>
+                        <button onclick="showQR('${e.id}')" class="flex-1 sm:flex-none bg-indigo-600 text-white px-8 py-4 rounded-2xl text-sm font-bold shadow-lg hover:bg-indigo-700 transition-colors">QR発行</button>
                     </div>
                 </div>
             `).join('');
@@ -525,9 +575,9 @@
             document.getElementById('detailContent').innerHTML = `
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100">
                     <div class="space-y-1"><span class="text-[10px] font-black text-indigo-300 uppercase">お名前</span><div class="font-bold">${e.data.name}</div></div>
-                    <div class="space-y-1"><span class="text-[10px] font-black text-indigo-300 uppercase">生年月日</span><div class="font-bold">${e.data.dob}</div></div>
+                    <div class="space-y-1"><span class="text-[10px] font-black text-indigo-300 uppercase">生年月日</span><div class="font-bold">${formatDate(e.data.dob)}</div></div>
                     <div class="space-y-1"><span class="text-[10px] font-black text-indigo-300 uppercase">電話番号</span><div class="font-bold">${e.data.phone}</div></div>
-                    <div class="space-y-1"><span class="text-[10px] font-black text-indigo-300 uppercase">住所</span><div class="font-bold">${e.data.address}</div></div>
+                    <div class="space-y-1 sm:col-span-2"><span class="text-[10px] font-black text-indigo-300 uppercase">住所</span><div class="font-bold">${e.data.address}</div></div>
                 </div>
                 <div class="grid grid-cols-1 gap-4">
                     <div class="bg-gray-50 p-4 rounded-2xl"><span class="text-[10px] text-gray-400 block mb-1">指摘疾患</span><div class="font-bold">${diag}</div></div>
@@ -541,13 +591,15 @@
 
         function showQR(id) {
             const e = window.entries.find(x => x.id === id);
-            if (!e) return;
+            if (!e || typeof Encoding === 'undefined') return;
+
             const sep = "　"; 
             const nl = "\n";  
+
             let text = "【問診票】" + nl;
             text += `氏名${sep}${e.data.name}` + nl;
             text += `ふりがな${sep}${e.data.kana || 'なし'}` + nl;
-            text += `生年月日${sep}${e.data.dob}` + nl; 
+            text += `生年月日${sep}${formatDate(e.data.dob)}` + nl; 
             text += `電話${sep}${e.data.phone}` + nl;
             text += `住所${sep}${e.data.address}` + nl;
             text += `きっかけ${sep}${e.data.referral}` + nl;
@@ -564,28 +616,50 @@
 
             document.getElementById('textPreview').innerText = text;
             document.getElementById('modalTitle').innerText = e.data.name;
+
             const unicodeArray = Encoding.stringToCode(text);
             const sjisByteArray = Encoding.convert(unicodeArray, { to: 'SJIS', from: 'UNICODE' });
             const binaryString = sjisByteArray.map(b => String.fromCharCode(b)).join('');
+
             const container = document.getElementById('qrcodeContainer');
             container.innerHTML = "";
             const qr = qrcode(0, 'M');
             qr.addData(binaryString, 'Byte'); 
             qr.make();
             container.innerHTML = qr.createSvgTag({cellSize: 5, margin: 2});
+
             document.getElementById('qrModal').classList.remove('hidden');
+        }
+
+        // --- Helper Helpers ---
+        function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+        function showSettings() { document.getElementById('settingsModal').classList.remove('hidden'); }
+        function toHalfWidth(el) { el.value = el.value.replace(/[０-９ー－]/g, s => (s === 'ー' || s === '－') ? '-' : String.fromCharCode(s.charCodeAt(0) - 0xFEE0)); }
+        function clearError(el) { if (el.value.trim() !== "") el.classList.remove('input-error'); }
+        function formatDate(dateStr) {
+            if (!dateStr) return 'なし';
+            const parts = dateStr.split('-');
+            if (parts.length !== 3) return dateStr;
+            return `${parts[0]}/${parts[1]}/${parts[2]}`;
+        }
+
+        function updatePassword() {
+            const newPw = document.getElementById('newPw').value;
+            if (!newPw) { alert('入力してください'); return; }
+            if (newPw !== document.getElementById('newPwConfirm').value) { alert('一致しません'); return; }
+            window.masterPassword = newPw;
+            alert('パスワードを更新しました');
+            closeModal('settingsModal');
         }
 
         // Cleanup check
         setInterval(() => {
             const now = new Date();
-            if (now.getHours() === 23 && now.getMinutes() === 0) window.cleanupDatabase();
+            if (now.getHours() === 23 && now.getMinutes() === 0) {
+                if (window.cleanupDatabase) window.cleanupDatabase();
+            }
         }, 60000);
 
-        function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
-        function showSettings() { document.getElementById('settingsModal').classList.remove('hidden'); }
-        function toHalfWidth(el) { el.value = el.value.replace(/[０-９ー－]/g, s => (s === 'ー' || s === '－') ? '-' : String.fromCharCode(s.charCodeAt(0) - 0xFEE0)); }
-        function clearError(el) { if (el.value.trim() !== "") el.classList.remove('input-error'); }
         window.currentStep = 1;
     </script>
 </body>
